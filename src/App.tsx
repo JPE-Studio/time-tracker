@@ -167,7 +167,27 @@ function App() {
         .slice(0, 10);
     }, [data.timeEntries]);
 
-    const filteredProjects = data.projects.filter(p => p.clientId === selectedClient);
+      // Create a map of projects with customer names for display
+    const projectsWithClients = useMemo(() => {
+      return data.projects.map(project => {
+        const client = data.clients.find(c => c.id === project.clientId);
+        return {
+          ...project,
+          displayName: client ? `${project.name} (${client.name})` : project.name,
+          clientName: client?.name || 'Unbekannt'
+        };
+      }).sort((a, b) => a.displayName.localeCompare(b.displayName));
+    }, [data.projects, data.clients]);
+
+    // Auto-select customer when project changes
+    useEffect(() => {
+      if (selectedProject) {
+        const project = data.projects.find(p => p.id === selectedProject);
+        if (project && project.clientId !== selectedClient) {
+          setSelectedClient(project.clientId);
+        }
+      }
+    }, [selectedProject, data.projects, selectedClient]);
 
     return (
       <div className="dashboard">
@@ -221,27 +241,13 @@ function App() {
           {timerState !== 'idle' && (
             <div className="timer-details">
               <div className="form-group">
-                <label>Kunde</label>
-                <select 
-                  value={selectedClient} 
-                  onChange={(e) => {
-                    setSelectedClient(e.target.value);
-                    setSelectedProject('');
-                  }}
-                >
-                  <option value="">Kunde wählen...</option>
-                  {data.clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-              </div>
-              <div className="form-group">
                 <label>Projekt</label>
                 <select 
                   value={selectedProject} 
                   onChange={(e) => setSelectedProject(e.target.value)}
-                  disabled={!selectedClient}
                 >
                   <option value="">Projekt wählen...</option>
-                  {filteredProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  {projectsWithClients.map(p => <option key={p.id} value={p.id}>{p.displayName}</option>)}
                 </select>
               </div>
               <div className="form-group">
@@ -277,7 +283,6 @@ function App() {
                     <button 
                       className="btn btn-secondary btn-sm" 
                       onClick={() => handleRestartEntry(entry)}
-                      disabled={timerState !== 'idle'}
                     >
                       🔄 Neu starten
                     </button>
