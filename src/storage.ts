@@ -170,6 +170,36 @@ export function stopTimer(entryId: string): TimeEntry | null {
   });
 }
 
+export function pauseTimer(entryId: string): TimeEntry | null {
+  const data = loadData();
+  const entry = data.timeEntries.find(e => e.id === entryId);
+  if (!entry || !entry.isRunning) return null;
+  
+  const now = new Date();
+  const startTime = new Date(entry.startTime);
+  const duration = Math.floor((now.getTime() - startTime.getTime()) / 1000) + entry.duration;
+  
+  return updateTimeEntry(entryId, {
+    duration,
+    isRunning: false,
+  });
+}
+
+export function resumeTimer(entryId: string): TimeEntry | null {
+  const data = loadData();
+  const entry = data.timeEntries.find(e => e.id === entryId);
+  if (!entry || entry.isRunning) return null;
+  
+  // Stop any other running timers
+  stopAllRunningTimers();
+  
+  const now = new Date();
+  return updateTimeEntry(entryId, {
+    startTime: now.toISOString(),
+    isRunning: true,
+  });
+}
+
 export function stopAllRunningTimers(): void {
   const data = loadData();
   const now = new Date();
@@ -252,4 +282,241 @@ export function downloadCSV(): void {
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
+}
+
+// HTML Report Export
+interface ClientReport {
+  client: Client;
+  totalSeconds: number;
+  billableAmount: number;
+  projects: Map<string, {
+    project: Project;
+    seconds: number;
+    amount: number;
+  }>;
+}
+
+export function exportToHTML(
+  selectedMonth: string,
+  clientReports: ClientReport[],
+  totalMonthSeconds: number,
+  totalMonthAmount: number
+): string {
+  const [year, month] = selectedMonth.split('-');
+  const monthNames = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 
+                     'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
+  const monthName = monthNames[parseInt(month) - 1];
+
+  const formatCurrency = (amount: number) => {
+    return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(amount);
+  };
+
+  const formatDurationShort = (seconds: number) => {
+    const hours = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    return `${hours}h ${mins}m`;
+  };
+
+  const totalHours = (totalMonthSeconds / 3600).toFixed(2);
+
+  const html = `<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zeiterfassung ${monthName} ${year}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f3f4f6;
+      color: #1f2937;
+      line-height: 1.5;
+      padding: 2rem;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    .header {
+      background: white;
+      border-radius: 12px;
+      padding: 2rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .header h1 {
+      font-size: 1.75rem;
+      color: #2563eb;
+      margin-bottom: 0.5rem;
+    }
+    .header-date {
+      color: #6b7280;
+      font-size: 1.125rem;
+    }
+    .summary {
+      background: linear-gradient(135deg, #2563eb, #1d4ed8);
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      color: white;
+    }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1.5rem;
+    }
+    .summary-item {
+      text-align: center;
+    }
+    .summary-value {
+      font-size: 2rem;
+      font-weight: 700;
+      margin-bottom: 0.25rem;
+    }
+    .summary-label {
+      font-size: 0.875rem;
+      opacity: 0.9;
+    }
+    .client-card {
+      background: white;
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .client-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    .client-name {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: #111827;
+    }
+    .client-totals {
+      text-align: right;
+    }
+    .client-hours {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: #2563eb;
+    }
+    .client-amount {
+      font-size: 1rem;
+      color: #16a34a;
+      font-weight: 500;
+    }
+    .projects-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .projects-table th,
+    .projects-table td {
+      text-align: left;
+      padding: 0.75rem;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    .projects-table th {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #6b7280;
+      font-weight: 600;
+    }
+    .projects-table td {
+      font-size: 0.875rem;
+    }
+    .text-right {
+      text-align: right;
+    }
+    .no-rate {
+      color: #9ca3af;
+    }
+    .footer {
+      text-align: center;
+      color: #6b7280;
+      font-size: 0.875rem;
+      margin-top: 2rem;
+      padding-top: 1rem;
+      border-top: 1px solid #e5e7eb;
+    }
+    @media print {
+      body { background: white; padding: 0; }
+      .header, .summary, .client-card { box-shadow: none; border: 1px solid #e5e7eb; }
+    }
+    @media (max-width: 640px) {
+      body { padding: 1rem; }
+      .summary-grid { grid-template-columns: 1fr; gap: 1rem; }
+      .client-header { flex-direction: column; align-items: flex-start; }
+      .client-totals { text-align: left; margin-top: 0.5rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>⏱️ Zeiterfassungsreport</h1>
+      <div class="header-date">${monthName} ${year}</div>
+    </div>
+    
+    <div class="summary">
+      <div class="summary-grid">
+        <div class="summary-item">
+          <div class="summary-value">${totalHours}h</div>
+          <div class="summary-label">Gesamtstunden</div>
+        </div>
+        <div class="summary-item">
+          <div class="summary-value">${formatCurrency(totalMonthAmount)}</div>
+          <div class="summary-label">Rechnungsbetrag</div>
+        </div>
+        <div class="summary-item">
+          <div class="summary-value">${clientReports.length}</div>
+          <div class="summary-label">Kunden</div>
+        </div>
+      </div>
+    </div>
+
+    ${clientReports.map(report => `
+    <div class="client-card">
+      <div class="client-header">
+        <div class="client-name">${report.client.name}</div>
+        <div class="client-totals">
+          <div class="client-hours">${formatDurationShort(report.totalSeconds)}</div>
+          <div class="client-amount">${formatCurrency(report.billableAmount)}</div>
+        </div>
+      </div>
+      <table class="projects-table">
+        <thead>
+          <tr>
+            <th>Projekt</th>
+            <th class="text-right">Stunden</th>
+            <th class="text-right">Betrag</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${Array.from(report.projects.values()).map(proj => `
+          <tr>
+            <td>${proj.project.name}</td>
+            <td class="text-right">${formatDurationShort(proj.seconds)}</td>
+            <td class="text-right">${proj.project.hourlyRate ? formatCurrency(proj.amount) : '<span class="no-rate">-</span>'}</td>
+          </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+    `).join('')}
+
+    <div class="footer">
+      Generiert am ${new Date().toLocaleDateString('de-DE')} um ${new Date().toLocaleTimeString('de-DE', {hour: '2-digit', minute:'2-digit'})}
+    </div>
+  </div>
+</body>
+</html>`;
+
+  return html;
 }
