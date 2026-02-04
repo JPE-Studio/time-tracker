@@ -1,6 +1,7 @@
 import type { AppData, Client, Project, TimeEntry } from './types';
 
 const STORAGE_KEY = 'timetracker_data';
+const WEEKLY_GOAL_KEY = 'timetracker_weekly_goal';
 
 export const defaultData: AppData = {
   clients: [],
@@ -25,6 +26,24 @@ export function saveData(data: AppData): void {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
   } catch (error) {
     console.error('Failed to save data to localStorage:', error);
+  }
+}
+
+// Weekly Goal functions
+export function getWeeklyGoal(): number {
+  try {
+    const saved = localStorage.getItem(WEEKLY_GOAL_KEY);
+    return saved ? parseInt(saved, 10) : 40;
+  } catch {
+    return 40;
+  }
+}
+
+export function setWeeklyGoal(hours: number): void {
+  try {
+    localStorage.setItem(WEEKLY_GOAL_KEY, hours.toString());
+  } catch (error) {
+    console.error('Failed to save weekly goal:', error);
   }
 }
 
@@ -59,7 +78,7 @@ export function deleteClient(id: string): boolean {
   // Also delete associated projects and time entries
   const projectsToDelete = data.projects.filter(p => p.clientId === id).map(p => p.id);
   data.projects = data.projects.filter(p => p.clientId !== id);
-  data.timeEntries = data.timeEntries.filter(e => !projectsToDelete.includes(e.projectId) && e.clientId !== id);
+  data.timeEntries = data.timeEntries.filter(e => !(e.projectId && projectsToDelete.includes(e.projectId)) && !(e.clientId && e.clientId === id));
   
   if (data.clients.length < initialLength) {
     saveData(data);
@@ -95,7 +114,7 @@ export function deleteProject(id: string): boolean {
   const data = loadData();
   const initialLength = data.projects.length;
   data.projects = data.projects.filter(p => p.id !== id);
-  data.timeEntries = data.timeEntries.filter(e => e.projectId !== id);
+  data.timeEntries = data.timeEntries.filter(e => e.projectId && e.projectId !== id);
   
   if (data.projects.length < initialLength) {
     saveData(data);
@@ -510,6 +529,214 @@ export function exportToHTML(
       </table>
     </div>
     `).join('')}
+
+    <div class="footer">
+      Generiert am ${new Date().toLocaleDateString('de-DE')} um ${new Date().toLocaleTimeString('de-DE', {hour: '2-digit', minute:'2-digit'})}
+    </div>
+  </div>
+</body>
+</html>`;
+
+  return html;
+}
+
+// Export single customer report to HTML
+export function exportCustomerToHTML(selectedMonth: string, report: ClientReport): string {
+  const [year, month] = selectedMonth.split('-');
+  const monthNames = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 
+                     'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
+  const monthName = monthNames[parseInt(month) - 1];
+
+  const formatCurrency = (amount: number) => {
+    return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(amount);
+  };
+
+  const formatDurationShort = (seconds: number) => {
+    const hours = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    return `${hours}h ${mins}m`;
+  };
+
+  const totalHours = (report.totalSeconds / 3600).toFixed(2);
+
+  const html = `<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zeiterfassung ${report.client.name} - ${monthName} ${year}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f3f4f6;
+      color: #1f2937;
+      line-height: 1.5;
+      padding: 2rem;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    .header {
+      background: white;
+      border-radius: 12px;
+      padding: 2rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .header h1 {
+      font-size: 1.75rem;
+      color: #2563eb;
+      margin-bottom: 0.5rem;
+    }
+    .header h2 {
+      font-size: 1.25rem;
+      color: #374151;
+      margin-bottom: 0.5rem;
+    }
+    .header-date {
+      color: #6b7280;
+      font-size: 1.125rem;
+    }
+    .summary {
+      background: linear-gradient(135deg, #2563eb, #1d4ed8);
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      color: white;
+    }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1.5rem;
+    }
+    .summary-item {
+      text-align: center;
+    }
+    .summary-value {
+      font-size: 2.5rem;
+      font-weight: 700;
+      margin-bottom: 0.25rem;
+    }
+    .summary-label {
+      font-size: 0.875rem;
+      opacity: 0.9;
+    }
+    .projects-card {
+      background: white;
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .projects-card h3 {
+      font-size: 1.125rem;
+      color: #374151;
+      margin-bottom: 1rem;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    .projects-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .projects-table th,
+    .projects-table td {
+      text-align: left;
+      padding: 0.75rem;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    .projects-table th {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #6b7280;
+      font-weight: 600;
+    }
+    .projects-table td {
+      font-size: 0.875rem;
+    }
+    .projects-table tr:last-child td {
+      border-bottom: none;
+      font-weight: 600;
+      background: #f9fafb;
+    }
+    .text-right {
+      text-align: right;
+    }
+    .no-rate {
+      color: #9ca3af;
+    }
+    .footer {
+      text-align: center;
+      color: #6b7280;
+      font-size: 0.875rem;
+      margin-top: 2rem;
+      padding-top: 1rem;
+      border-top: 1px solid #e5e7eb;
+    }
+    @media print {
+      body { background: white; padding: 0; }
+      .header, .summary, .projects-card { box-shadow: none; border: 1px solid #e5e7eb; }
+    }
+    @media (max-width: 640px) {
+      body { padding: 1rem; }
+      .summary-grid { grid-template-columns: 1fr; gap: 1rem; }
+      .summary-value { font-size: 2rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>⏱️ Zeiterfassungsreport</h1>
+      <h2>${report.client.name}</h2>
+      <div class="header-date">${monthName} ${year}</div>
+    </div>
+    
+    <div class="summary">
+      <div class="summary-grid">
+        <div class="summary-item">
+          <div class="summary-value">${totalHours}h</div>
+          <div class="summary-label">Gesamtstunden</div>
+        </div>
+        <div class="summary-item">
+          <div class="summary-value">${formatCurrency(report.billableAmount)}</div>
+          <div class="summary-label">Rechnungsbetrag</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="projects-card">
+      <h3>📁 Projekte</h3>
+      <table class="projects-table">
+        <thead>
+          <tr>
+            <th>Projekt</th>
+            <th class="text-right">Stunden</th>
+            <th class="text-right">Stundensatz</th>
+            <th class="text-right">Betrag</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${Array.from(report.projects.values()).map(proj => `
+          <tr>
+            <td>${proj.project.name}</td>
+            <td class="text-right">${formatDurationShort(proj.seconds)}</td>
+            <td class="text-right">${proj.project.hourlyRate ? formatCurrency(proj.project.hourlyRate) : '-'}</td>
+            <td class="text-right">${proj.project.hourlyRate ? formatCurrency(proj.amount) : '<span class="no-rate">-</span>'}</td>
+          </tr>
+          `).join('')}
+          <tr>
+            <td>Gesamt</td>
+            <td class="text-right">${formatDurationShort(report.totalSeconds)}</td>
+            <td class="text-right">-</td>
+            <td class="text-right">${formatCurrency(report.billableAmount)}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
 
     <div class="footer">
       Generiert am ${new Date().toLocaleDateString('de-DE')} um ${new Date().toLocaleTimeString('de-DE', {hour: '2-digit', minute:'2-digit'})}

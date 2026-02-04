@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import type { Client, Project, TimeEntry } from './types';
 import {
   loadData,
@@ -18,15 +18,24 @@ import {
   getRunningTimer,
   downloadCSV,
   exportToHTML,
+  exportCustomerToHTML,
+  getWeeklyGoal,
+  setWeeklyGoal,
 } from './storage';
 import './App.css';
 
 type View = 'dashboard' | 'clients' | 'time-entries' | 'reports';
 type TimerState = 'idle' | 'running' | 'paused';
 
+const QUICK_TASKS = ['Meeting', 'Development', 'Email', 'Research', 'Planning', 'Review'];
+
 function App() {
   const [view, setView] = useState<View>('dashboard');
   const [data, setData] = useState(loadData());
+  const [darkMode, setDarkMode] = useState(() => {
+    const saved = localStorage.getItem('timetracker_darkmode');
+    return saved ? JSON.parse(saved) : false;
+  });
   
   // Timer state
   const [timerState, setTimerState] = useState<TimerState>('idle');
@@ -34,9 +43,12 @@ function App() {
   const [elapsedTime, setElapsedTime] = useState(0);
   
   // Timer form state (filled while timer runs)
-  const [selectedClient, setSelectedClient] = useState('');
-  const [selectedProject, setSelectedProject] = useState('');
+  const [selectedClient, setSelectedClient] = useState<string | undefined>('');
+  const [selectedProject, setSelectedProject] = useState<string | undefined>('');
   const [description, setDescription] = useState('');
+
+  // Auto-save description timeout ref
+  const descriptionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Refresh data when view changes
   useEffect(() => {
@@ -68,6 +80,21 @@ function App() {
     return () => clearInterval(interval);
   }, [timerState, currentEntry]);
 
+  // Dark mode effect
+  useEffect(() => {
+    document.body.classList.toggle('dark-mode', darkMode);
+    localStorage.setItem('timetracker_darkmode', JSON.stringify(darkMode));
+  }, [darkMode]);
+
+  // Clear timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (descriptionTimeoutRef.current) {
+        clearTimeout(descriptionTimeoutRef.current);
+      }
+    };
+  }, []);
+
   const refreshData = () => setData(loadData());
 
   const formatDuration = (seconds: number) => {
@@ -87,6 +114,22 @@ function App() {
     return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(amount);
   };
 
+  // Auto-save description
+  const handleDescriptionChange = (value: string) => {
+    setDescription(value);
+    
+    if (descriptionTimeoutRef.current) {
+      clearTimeout(descriptionTimeoutRef.current);
+    }
+    
+    if (currentEntry) {
+      descriptionTimeoutRef.current = setTimeout(() => {
+        updateTimeEntry(currentEntry.id, { description: value });
+        setCurrentEntry({ ...currentEntry, description: value });
+      }, 500);
+    }
+  };
+
   // Timer controls
   const handleStartTimer = () => {
     const timer = startTimer('', '', '');
@@ -96,6 +139,17 @@ function App() {
     setSelectedClient('');
     setSelectedProject('');
     setDescription('');
+    refreshData();
+  };
+
+  const handleStartTimerWithTask = (taskName: string) => {
+    const timer = startTimer('', '', taskName);
+    setCurrentEntry(timer);
+    setTimerState('running');
+    setElapsedTime(0);
+    setSelectedClient('');
+    setSelectedProject('');
+    setDescription(taskName);
     refreshData();
   };
 
@@ -122,6 +176,11 @@ function App() {
 
   const handleStopTimer = () => {
     if (currentEntry) {
+      // Clear any pending auto-save
+      if (descriptionTimeoutRef.current) {
+        clearTimeout(descriptionTimeoutRef.current);
+      }
+      
       // Update entry with selected details before stopping
       updateTimeEntry(currentEntry.id, {
         clientId: selectedClient || undefined,
@@ -141,7 +200,7 @@ function App() {
   };
 
   const handleRestartEntry = (entry: TimeEntry) => {
-    const timer = startTimer(entry.projectId, entry.clientId, entry.description);
+    const timer = startTimer(entry.projectId || '', entry.clientId || '', entry.description);
     setCurrentEntry(timer);
     setTimerState('running');
     setSelectedClient(entry.clientId);
@@ -151,23 +210,43 @@ function App() {
     refreshData();
   };
 
+  // Handle project selection while timer runs
+  const handleProjectChange = (projectId: string) => {
+    setSelectedProject(projectId);
+    
+    // Auto-update client when project changes
+    const project = data.projects.find(p => p.id === projectId);
+    if (project) {
+      setSelectedClient(project.clientId);
+      
+      // Auto-save to current entry
+      if (currentEntry) {
+        updateTimeEntry(currentEntry.id, {
+          projectId: projectId || undefined,
+          clientId: project.clientId,
+        });
+        setCurrentEntry({
+          ...currentEntry,
+          projectId: projectId || undefined,
+          clientId: project.clientId,
+        });
+      }
+    } else {
+      setSelectedClient('');
+      if (currentEntry) {
+        updateTimeEntry(currentEntry.id, { projectId: undefined, clientId: undefined });
+        setCurrentEntry({
+          ...currentEntry,
+          projectId: undefined,
+          clientId: undefined,
+        });
+      }
+    }
+  };
+
   // Dashboard View
   const Dashboard = () => {
-    const totalHours = data.timeEntries.reduce((sum, e) => sum + e.duration, 0) / 3600;
-    const today = new Date().toDateString();
-    const todayHours = data.timeEntries
-      .filter(e => new Date(e.startTime).toDateString() === today)
-      .reduce((sum, e) => sum + e.duration, 0) / 3600;
-
-    // Recent entries (last 10 completed)
-    const recentEntries = useMemo(() => {
-      return [...data.timeEntries]
-        .filter(e => !e.isRunning && e.endTime)
-        .sort((a, b) => new Date(b.endTime!).getTime() - new Date(a.endTime!).getTime())
-        .slice(0, 10);
-    }, [data.timeEntries]);
-
-      // Create a map of projects with customer names for display
+    // Create a map of projects with customer names for display
     const projectsWithClients = useMemo(() => {
       return data.projects.map(project => {
         const client = data.clients.find(c => c.id === project.clientId);
@@ -179,44 +258,76 @@ function App() {
       }).sort((a, b) => a.displayName.localeCompare(b.displayName));
     }, [data.projects, data.clients]);
 
-    // Auto-select customer when project changes
-    useEffect(() => {
-      if (selectedProject) {
-        const project = data.projects.find(p => p.id === selectedProject);
-        if (project && project.clientId !== selectedClient) {
-          setSelectedClient(project.clientId);
-        }
-      }
-    }, [selectedProject, data.projects, selectedClient]);
+    // Weekly goal
+    const [weeklyGoal, setWeeklyGoalState] = useState(getWeeklyGoal());
+    const [showGoalEditor, setShowGoalEditor] = useState(false);
+    const [goalInput, setGoalInput] = useState(weeklyGoal.toString());
+
+    // Calculate weekly progress
+    const weeklyProgress = useMemo(() => {
+      const now = new Date();
+      const startOfWeek = new Date(now);
+      startOfWeek.setDate(now.getDate() - now.getDay() + 1); // Monday
+      startOfWeek.setHours(0, 0, 0, 0);
+      
+      const endOfWeek = new Date(startOfWeek);
+      endOfWeek.setDate(startOfWeek.getDate() + 7);
+      
+      const weekSeconds = data.timeEntries
+        .filter(e => {
+          const entryDate = new Date(e.startTime);
+          return entryDate >= startOfWeek && entryDate < endOfWeek && !e.isRunning;
+        })
+        .reduce((sum, e) => sum + e.duration, 0);
+      
+      const weekHours = weekSeconds / 3600;
+      const percentage = Math.min(100, (weekHours / weeklyGoal) * 100);
+      
+      return { hours: weekHours, percentage };
+    }, [data.timeEntries, weeklyGoal]);
+
+    const handleSaveGoal = () => {
+      const newGoal = parseFloat(goalInput) || 40;
+      setWeeklyGoal(newGoal);
+      setWeeklyGoalState(newGoal);
+      setShowGoalEditor(false);
+    };
+
+    // Recent entries (last 10 completed)
+    const recentEntries = useMemo(() => {
+      return [...data.timeEntries]
+        .filter(e => !e.isRunning && e.endTime)
+        .sort((a, b) => new Date(b.endTime!).getTime() - new Date(a.endTime!).getTime())
+        .slice(0, 10);
+    }, [data.timeEntries]);
 
     return (
       <div className="dashboard">
-        <div className="stats-grid">
-          <div className="stat-card">
-            <div className="stat-value">{data.clients.length}</div>
-            <div className="stat-label">Kunden</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-value">{data.projects.length}</div>
-            <div className="stat-label">Projekte</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-value">{totalHours.toFixed(1)}h</div>
-            <div className="stat-label">Gesamtstunden</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-value">{todayHours.toFixed(1)}h</div>
-            <div className="stat-label">Heute</div>
-          </div>
-        </div>
-
-        {/* Timer Section */}
-        <div className={`timer-section ${timerState !== 'idle' ? 'active' : ''}`}>
+        {/* Timer Section - Clean and minimal */}
+        <div className={`timer-section ${timerState !== 'idle' ? 'active' : ''} ${timerState === 'running' ? 'pulse' : ''}`}>
           {timerState === 'idle' ? (
-            <button className="btn btn-primary btn-timer-start" onClick={handleStartTimer}>
-              <span className="timer-icon">▶</span>
-              <span>Timer starten</span>
-            </button>
+            <>
+              <button className="btn btn-primary btn-timer-start" onClick={handleStartTimer}>
+                <span className="timer-icon">▶</span>
+                <span>Timer starten</span>
+              </button>
+              
+              {/* Quick-add buttons */}
+              <div className="quick-tasks">
+                <span className="quick-tasks-label">Schnellstart:</span>
+                <div className="quick-tasks-buttons">
+                  {QUICK_TASKS.map(task => (
+                    <button
+                      key={task}
+                      className="btn btn-sm btn-secondary quick-task-btn"
+                      onClick={() => handleStartTimerWithTask(task)}
+                    >
+                      {task}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
           ) : (
             <div className="timer-running">
               <div className="timer-display">{formatDuration(elapsedTime)}</div>
@@ -237,29 +348,66 @@ function App() {
             </div>
           )}
 
-          {/* Timer Details Form */}
+          {/* Timer Details Form - Always accessible */}
           {timerState !== 'idle' && (
             <div className="timer-details">
               <div className="form-group">
                 <label>Projekt</label>
                 <select 
                   value={selectedProject} 
-                  onChange={(e) => setSelectedProject(e.target.value)}
+                  onChange={(e) => handleProjectChange(e.target.value)}
+                  className="project-select"
                 >
                   <option value="">Projekt wählen...</option>
                   {projectsWithClients.map(p => <option key={p.id} value={p.id}>{p.displayName}</option>)}
                 </select>
               </div>
               <div className="form-group">
-                <label>Beschreibung</label>
+                <label>Beschreibung <span className="auto-save-hint">(auto-gespeichert)</span></label>
                 <input 
                   type="text" 
                   value={description}
-                  onChange={(e) => setDescription(e.target.value)}
+                  onChange={(e) => handleDescriptionChange(e.target.value)}
                   placeholder="Was machst du gerade?"
+                  className="description-input"
                 />
               </div>
             </div>
+          )}
+        </div>
+
+        {/* Weekly Goal Progress */}
+        <div className="weekly-goal card">
+          <div className="weekly-goal-header">
+            <h3>🎯 Wochenziel</h3>
+            <button className="btn btn-icon" onClick={() => setShowGoalEditor(!showGoalEditor)}>✏️</button>
+          </div>
+          {showGoalEditor ? (
+            <div className="goal-editor">
+              <input
+                type="number"
+                value={goalInput}
+                onChange={(e) => setGoalInput(e.target.value)}
+                min="1"
+                max="168"
+                step="1"
+              />
+              <span>Stunden/Woche</span>
+              <button className="btn btn-primary btn-sm" onClick={handleSaveGoal}>Speichern</button>
+            </div>
+          ) : (
+            <>
+              <div className="progress-bar-container">
+                <div 
+                  className="progress-bar" 
+                  style={{ width: `${weeklyProgress.percentage}%` }}
+                />
+              </div>
+              <div className="progress-stats">
+                <span>{weeklyProgress.hours.toFixed(1)}h / {weeklyGoal}h</span>
+                <span>{Math.round(weeklyProgress.percentage)}%</span>
+              </div>
+            </>
           )}
         </div>
 
@@ -596,8 +744,8 @@ function App() {
       const end = entry.endTime ? new Date(entry.endTime) : start;
       
       setFormData({
-        clientId: entry.clientId,
-        projectId: entry.projectId,
+        clientId: entry.clientId || '',
+        projectId: entry.projectId || '',
         description: entry.description,
         date: start.toISOString().split('T')[0],
         startTime: start.toTimeString().slice(0, 5),
@@ -739,12 +887,14 @@ function App() {
     );
   };
 
-  // Monthly Reports View
+  // Monthly Reports View with Customer Selection
   const ReportsView = () => {
     const [selectedMonth, setSelectedMonth] = useState(() => {
       const now = new Date();
       return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
     });
+    
+    const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
 
     const monthNames = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 
                        'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
@@ -757,7 +907,7 @@ function App() {
       });
     }, [data.timeEntries, selectedMonth]);
 
-    const clientReports = useMemo(() => {
+    const customerReports = useMemo(() => {
       const reports = new Map<string, {
         client: Client;
         totalSeconds: number;
@@ -809,11 +959,66 @@ function App() {
       return Array.from(reports.values()).sort((a, b) => b.totalSeconds - a.totalSeconds);
     }, [monthEntries, data.clients, data.projects]);
 
-    const totalMonthSeconds = clientReports.reduce((sum, r) => sum + r.totalSeconds, 0);
-    const totalMonthAmount = clientReports.reduce((sum, r) => sum + r.billableAmount, 0);
+    // Filter reports by selected customer
+    const filteredReports = useMemo(() => {
+      if (!selectedCustomerId) return customerReports;
+      return customerReports.filter(r => r.client.id === selectedCustomerId);
+    }, [customerReports, selectedCustomerId]);
+
+    const totalMonthSeconds = filteredReports.reduce((sum, r) => sum + r.totalSeconds, 0);
+    const totalMonthAmount = filteredReports.reduce((sum, r) => sum + r.billableAmount, 0);
+
+    // Daily and weekly summaries
+    const timeSummaries = useMemo(() => {
+      const now = new Date();
+      const today = now.toDateString();
+      
+      // Today
+      const todaySeconds = data.timeEntries
+        .filter(e => new Date(e.startTime).toDateString() === today && !e.isRunning)
+        .reduce((sum, e) => sum + e.duration, 0);
+      
+      // This week (Monday to Sunday)
+      const startOfWeek = new Date(now);
+      startOfWeek.setDate(now.getDate() - now.getDay() + 1);
+      startOfWeek.setHours(0, 0, 0, 0);
+      
+      const endOfWeek = new Date(startOfWeek);
+      endOfWeek.setDate(startOfWeek.getDate() + 7);
+      
+      const weekSeconds = data.timeEntries
+        .filter(e => {
+          const entryDate = new Date(e.startTime);
+          return entryDate >= startOfWeek && entryDate < endOfWeek && !e.isRunning;
+        })
+        .reduce((sum, e) => sum + e.duration, 0);
+      
+      // Per day breakdown for current week
+      const weekDays: { day: string; hours: number }[] = [];
+      for (let i = 0; i < 7; i++) {
+        const dayDate = new Date(startOfWeek);
+        dayDate.setDate(startOfWeek.getDate() + i);
+        const dayString = dayDate.toDateString();
+        const daySeconds = data.timeEntries
+          .filter(e => new Date(e.startTime).toDateString() === dayString && !e.isRunning)
+          .reduce((sum, e) => sum + e.duration, 0);
+        
+        const dayNames = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
+        weekDays.push({
+          day: dayNames[dayDate.getDay()],
+          hours: daySeconds / 3600
+        });
+      }
+      
+      return {
+        today: todaySeconds / 3600,
+        week: weekSeconds / 3600,
+        weekDays
+      };
+    }, [data.timeEntries]);
 
     const handleExportHTML = () => {
-      const html = exportToHTML(selectedMonth, clientReports, totalMonthSeconds, totalMonthAmount);
+      const html = exportToHTML(selectedMonth, filteredReports, totalMonthSeconds, totalMonthAmount);
       const blob = new Blob([html], { type: 'text/html;charset=utf-8;' });
       const link = document.createElement('a');
       const url = URL.createObjectURL(blob);
@@ -821,6 +1026,30 @@ function App() {
       const [year, month] = selectedMonth.split('-');
       link.setAttribute('href', url);
       link.setAttribute('download', `report_${year}_${month}.html`);
+      link.style.visibility = 'hidden';
+      
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    };
+
+    const handleExportCustomerHTML = () => {
+      if (!selectedCustomerId) {
+        alert('Bitte wählen Sie einen Kunden aus');
+        return;
+      }
+      
+      const report = filteredReports[0];
+      if (!report) return;
+      
+      const html = exportCustomerToHTML(selectedMonth, report);
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8;' });
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      
+      const [year, month] = selectedMonth.split('-');
+      link.setAttribute('href', url);
+      link.setAttribute('download', `report_${report.client.name}_${year}_${month}.html`);
       link.style.visibility = 'hidden';
       
       document.body.appendChild(link);
@@ -838,15 +1067,71 @@ function App() {
       <div className="reports-view">
         <div className="view-header">
           <h2>Monatsübersicht</h2>
-          <button className="btn btn-secondary" onClick={handleExportHTML}>📄 HTML Export</button>
+          <div className="header-actions">
+            <button className="btn btn-secondary" onClick={handleExportHTML}>📄 Alle Exportieren</button>
+            {selectedCustomerId && (
+              <button className="btn btn-primary" onClick={handleExportCustomerHTML}>📄 Kunden Export</button>
+            )}
+          </div>
         </div>
 
+        {/* Daily/Weekly Summaries */}
+        <div className="time-summaries card">
+          <h3>⏱️ Zeitzusammenfassung</h3>
+          <div className="summary-grid-2">
+            <div className="summary-item highlight">
+              <div className="summary-value">{timeSummaries.today.toFixed(1)}h</div>
+              <div className="summary-label">Heute</div>
+            </div>
+            <div className="summary-item highlight">
+              <div className="summary-value">{timeSummaries.week.toFixed(1)}h</div>
+              <div className="summary-label">Diese Woche</div>
+            </div>
+          </div>
+          
+          {/* Weekly breakdown */}
+          <div className="week-breakdown">
+            {timeSummaries.weekDays.map((day, idx) => (
+              <div key={idx} className="week-day">
+                <div className="week-day-label">{day.day}</div>
+                <div className="week-day-bar-container">
+                  <div 
+                    className="week-day-bar" 
+                    style={{ 
+                      height: `${Math.min(100, (day.hours / 8) * 100)}%`,
+                      backgroundColor: day.hours >= 8 ? 'var(--success)' : 'var(--primary)'
+                    }}
+                  />
+                </div>
+                <div className="week-day-value">{day.hours.toFixed(1)}h</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Month Selector */}
         <div className="month-selector card">
           <button className="btn btn-icon" onClick={() => navigateMonth('prev')}>◀</button>
           <div className="month-display">
             {monthNames[parseInt(selectedMonth.split('-')[1]) - 1]} {selectedMonth.split('-')[0]}
           </div>
           <button className="btn btn-icon" onClick={() => navigateMonth('next')}>▶</button>
+        </div>
+
+        {/* Customer Selector */}
+        <div className="customer-selector card">
+          <div className="form-group">
+            <label>Kundenfilter</label>
+            <select 
+              value={selectedCustomerId} 
+              onChange={(e) => setSelectedCustomerId(e.target.value)}
+            >
+              <option value="">Alle Kunden</option>
+              {data.clients.map(c => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </div>
         </div>
 
         <div className="reports-summary card">
@@ -860,14 +1145,14 @@ function App() {
               <div className="summary-label">Rechnungsbetrag</div>
             </div>
             <div className="summary-item">
-              <div className="summary-value">{clientReports.length}</div>
+              <div className="summary-value">{filteredReports.length}</div>
               <div className="summary-label">Kunden</div>
             </div>
           </div>
         </div>
 
         <div className="reports-list">
-          {clientReports.map(report => (
+          {filteredReports.map(report => (
             <div key={report.client.id} className="report-card card">
               <div className="report-header">
                 <div className="report-client">{report.client.name}</div>
@@ -893,7 +1178,7 @@ function App() {
             </div>
           ))}
           
-          {clientReports.length === 0 && (
+          {filteredReports.length === 0 && (
             <div className="empty">Keine Zeiteinträge für diesen Monat</div>
           )}
         </div>
@@ -905,6 +1190,13 @@ function App() {
     <div className="app">
       <header className="app-header">
         <h1>⏱️ TimeTracker</h1>
+        <button 
+          className="dark-mode-toggle" 
+          onClick={() => setDarkMode(!darkMode)}
+          title={darkMode ? 'Light Mode' : 'Dark Mode'}
+        >
+          {darkMode ? '☀️' : '🌙'}
+        </button>
       </header>
 
       <nav className="nav">

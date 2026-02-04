@@ -19,8 +19,8 @@ export interface Project {
 
 export interface TimeEntry {
   id: string;
-  projectId: string;
-  clientId: string;
+  projectId?: string;
+  clientId?: string;
   description: string;
   startTime: string;
   endTime?: string;
